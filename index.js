@@ -19,10 +19,28 @@ db.serialize(() => {
         user_id TEXT PRIMARY KEY,
         username TEXT,
         last_seen TEXT,
-        timestamp INTEGER
+        timestamp INTEGER,
+        online_since INTEGER
     )
     `);
+
+    // Migration: เพิ่มคอลัมน์ online_since ให้ DB เก่าที่มีอยู่แล้ว
+    db.run(`ALTER TABLE last_seen ADD COLUMN online_since INTEGER`, (err) => {
+        if (err && !err.message.includes('duplicate column')) {
+            console.error('Migration error:', err.message);
+        }
+    });
 });
+
+// ฟังก์ชันแปลงมิลลิวินาที → "X ชั่วโมง Y นาที"
+function formatDuration(ms) {
+    const totalMinutes = Math.floor(ms / 60000);
+    if (totalMinutes < 1) return 'ไม่ถึง 1 นาที';
+    if (totalMinutes < 60) return `${totalMinutes} นาที`;
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    return minutes > 0 ? `${hours} ชั่วโมง ${minutes} นาที` : `${hours} ชั่วโมง`;
+}
 
 client.once('ready', async () => {
     console.log(`🟢 บอทออนไลน์แล้วในชื่อ: ${client.user.tag}`);
@@ -43,26 +61,48 @@ client.on('presenceUpdate', (oldPresence, newPresence) => {
 
     const thailandTime = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Bangkok' });
     const currentStatus = newPresence?.status || 'offline';
+    const oldStatus = oldPresence?.status || 'offline';
+    const now = Date.now();
 
-    db.run(
-        `INSERT OR REPLACE INTO last_seen (user_id, username, last_seen, timestamp) VALUES (?, ?, ?, ?)`,
-        [user.id, user.tag, thailandTime, Date.now()],
-        (err) => {
-            if (err) console.error('❌ บันทึกฐานข้อมูลผิดพลาด:', err.message);
-        }
-    );
+    // ถ้าเพิ่งเปลี่ยนจาก offline มาเป็น online/idle/dnd = เริ่มออนไลน์ใหม่ → รีเซ็ต online_since
+    const justCameOnline =
+        (oldStatus === 'offline' || !oldPresence) &&
+        (currentStatus !== 'offline');
 
-    console.log(`[Presence] ${user.tag} เปลี่ยนสถานะเป็น -> ${currentStatus}`);
+    if (justCameOnline) {
+        db.run(
+            `INSERT OR REPLACE INTO last_seen (user_id, username, last_seen, timestamp, online_since)
+             VALUES (?, ?, ?, ?, ?)`,
+            [user.id, user.tag, thailandTime, now, now],
+            (err) => {
+                if (err) console.error('❌ บันทึกฐานข้อมูลผิดพลาด:', err.message);
+            }
+        );
+    } else {
+        // อัปเดต last_seen/timestamp ตามปกติ โดยไม่แตะ online_since
+        db.run(
+            `INSERT INTO last_seen (user_id, username, last_seen, timestamp, online_since)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(user_id) DO UPDATE SET
+                username = excluded.username,
+                last_seen = excluded.last_seen,
+                timestamp = excluded.timestamp`,
+            [user.id, user.tag, thailandTime, now, now],
+            (err) => {
+                if (err) console.error('❌ บันทึกฐานข้อมูลผิดพลาด:', err.message);
+            }
+        );
+    }
+
+    console.log(`[Presence] ${user.tag}: ${oldStatus} -> ${currentStatus}`);
 });
 
-// ตรวจจับคำสั่งพิมพ์ข้อความ
 client.on('messageCreate', async (message) => {
     if (message.author.bot || !message.guild) return;
 
     // คำสั่ง !online
     if (message.content === '!online') {
         try {
-            // บังคับดึงข้อมูลสมาชิกใหม่เพื่อให้ได้สถานะล่าสุดจริง ๆ
             await message.guild.members.fetch({ withPresences: true });
 
             const onlineMembers = message.guild.members.cache.filter(
@@ -77,22 +117,28 @@ client.on('messageCreate', async (message) => {
             const membersArray = Array.from(onlineMembers.values());
             let processedCount = 0;
 
-            if (membersArray.length === 0) {
-                return message.reply('🟢 ไม่มีใครออนไลน์อยู่เลยในขณะนี้');
-            }
-
             membersArray.forEach(member => {
                 db.get(
-                    'SELECT last_seen FROM last_seen WHERE user_id = ?',
+                    'SELECT last_seen, online_since FROM last_seen WHERE user_id = ?',
                     [member.user.id],
                     (err, row) => {
-                        const statusEmoji = member.presence.status === 'dnd' ? '🔴' : member.presence.status === 'idle' ? '🟡' : '🟢';
+                        const statusEmoji = member.presence.status === 'dnd' ? '🔴'
+                            : member.presence.status === 'idle' ? '🟡' : '🟢';
+
                         result += `${statusEmoji} **${member.user.username}** (${member.presence.status})\n`;
-                        
-                        if (row && row.last_seen) {
+
+                        // แสดงว่าออนไลน์มานานแค่ไหน
+                        if (row?.online_since) {
+                            const duration = formatDuration(Date.now() - row.online_since);
+                            result += `⏱️ ออนไลน์มาแล้ว: ${duration}\n`;
+                        } else {
+                            result += `⏱️ ออนไลน์มาแล้ว: ไม่ทราบ (ยังไม่มีประวัติ)\n`;
+                        }
+
+                        if (row?.last_seen) {
                             result += `⏰ อัปเดตล่าสุด: ${row.last_seen}\n\n`;
                         } else {
-                            result += `⏰ อัปเดตล่าสุด: กำลังออนไลน์ตอนนี้ (ยังไม่มีประวัติออฟไลน์)\n\n`;
+                            result += `⏰ อัปเดตล่าสุด: กำลังออนไลน์อยู่\n\n`;
                         }
 
                         processedCount++;
