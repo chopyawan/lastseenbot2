@@ -1,4 +1,4 @@
-require('dotenv').config(); // ✅ อ่านไฟล์ .env ได้ถูกต้อง
+require('dotenv').config(); // อ่านไฟล์ .env ได้ถูกต้อง
 const { Client, GatewayIntentBits } = require('discord.js');
 const sqlite3 = require('sqlite3').verbose();
 
@@ -173,10 +173,9 @@ client.on('messageCreate', async (message) => {
         }
     }
 
-    // ✅ คำสั่ง !seenall (เวอร์ชันอัปเกรดตามธีมที่คุณต้องการ)
+    // คำสั่ง !seenall (เวอร์ชันปรับปรุงตรรกะเวลาของคนออฟไลน์)
     if (message.content === '!seenall') {
         try {
-            // ดึงข้อมูลสถานะปัจจุบันของทุกคนในเซิร์ฟเวอร์มาก่อน
             await message.guild.members.fetch({ withPresences: true });
 
             db.all(
@@ -195,11 +194,9 @@ client.on('messageCreate', async (message) => {
                     let text = '📋 **รายชื่อคนออนไลน์ล่าสุด**\n\n';
 
                     rows.forEach((row) => {
-                        // ดึงสถานะปัจจุบันจริง ๆ ของคนนี้ในเซิร์ฟเวอร์
                         const member = message.guild.members.cache.get(row.user_id);
                         const currentStatus = member?.presence?.status || 'offline';
 
-                        // เลือกเอโมจิและคำสถานะตามจริง
                         let statusEmoji = '⚫';
                         let statusText = 'offline';
 
@@ -216,20 +213,23 @@ client.on('messageCreate', async (message) => {
 
                         const usernameOnly = row.username ? row.username.split('#')[0] : 'ไม่ทราบชื่อ';
 
-                        // ต่อข้อความบรรทัดที่ 1 และ 2 ตามเรฟของคุณ
                         text += `${statusEmoji} **${usernameOnly}** (${statusText})\n`;
                         text += `⏱️ ออนไลน์ล่าสุดเมื่อ: ${row.last_seen}\n`;
 
-                        // คำนวณเวลาออนไลน์/ออฟไลน์ให้ถูกต้องตามสถานะจริง
-                        let durationMs = 0;
+                        // ✅ แก้ไขตรรกะตรงนี้ตามที่คุณต้องการเป๊ะ ๆ
+                        let durationText = '';
                         if (currentStatus === 'offline') {
-                            durationMs = Date.now() - row.timestamp; // ออฟไลน์ไปแล้วนานแค่นี้
+                            // ถ้าออฟไลน์อยู่ ให้เอา (เวลาตอนกดปิดดิส) ลบด้วย (เวลาตอนเริ่มเปิดดิส) = ระยะเวลาที่ออนล่าสุด
+                            if (row.timestamp && row.online_since && row.timestamp > row.online_since) {
+                                durationText = formatDuration(row.timestamp - row.online_since);
+                            } else {
+                                durationText = 'ไม่ทราบ (ไม่มีบันทึกช่วงเริ่มต้น)';
+                            }
                         } else {
-                            durationMs = Date.now() - (row.online_since || row.timestamp); // ออนไลน์ต่อเนื่องมานานแค่นี้
+                            // ถ้ายังออนไลน์อยู่ ให้เอา เวลาปัจจุบัน ลบด้วย เวลาตอนเริ่มเปิดดิส
+                            durationText = formatDuration(Date.now() - (row.online_since || row.timestamp));
                         }
-                        const durationText = formatDuration(durationMs);
 
-                        // บรรทัดที่ 3 แสดงระยะเวลา
                         text += `⏰ เวลาออนไลน์: ${durationText}\n\n`;
                     });
 
