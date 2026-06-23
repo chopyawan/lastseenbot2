@@ -1,3 +1,4 @@
+require('dotenv').config(); // ✅ 1. เพิ่มบรรทัดนี้เพื่อให้อ่านไฟล์ .env ได้ถูกต้อง
 const { Client, GatewayIntentBits } = require('discord.js');
 const sqlite3 = require('sqlite3').verbose();
 
@@ -97,6 +98,16 @@ client.on('presenceUpdate', (oldPresence, newPresence) => {
     console.log(`[Presence] ${user.tag}: ${oldStatus} -> ${currentStatus}`);
 });
 
+// ฟังก์ชันครอบ db.get เพื่อให้ใช้ async/await ได้ง่ายและเรียงลำดับถูกต้อง
+const dbGetAsync = (query, params) => {
+    return new Promise((resolve, reject) => {
+        db.get(query, params, (err, row) => {
+            if (err) reject(err);
+            else resolve(row);
+        });
+    });
+};
+
 client.on('messageCreate', async (message) => {
     if (message.author.bot || !message.guild) return;
 
@@ -115,39 +126,49 @@ client.on('messageCreate', async (message) => {
 
             let result = '🟢 **รายชื่อคนออนไลน์ตอนนี้**\n\n';
             const membersArray = Array.from(onlineMembers.values());
-            let processedCount = 0;
 
-            membersArray.forEach(member => {
-                db.get(
-                    'SELECT last_seen, online_since FROM last_seen WHERE user_id = ?',
-                    [member.user.id],
-                    (err, row) => {
-                        const statusEmoji = member.presence.status === 'dnd' ? '🔴'
-                            : member.presence.status === 'idle' ? '🟡' : '🟢';
+            // ✅ เปลี่ยนมาใช้ for...of ร่วมกับ Async/Await เพื่อป้องกันข้อความตีกันและเรียงลำดับสวยงาม
+            for (const member of membersArray) {
+                try {
+                    const row = await dbGetAsync(
+                        'SELECT last_seen, online_since FROM last_seen WHERE user_id = ?',
+                        [member.user.id]
+                    );
 
-                        result += `${statusEmoji} **${member.user.username}** (${member.presence.status})\n`;
+                    const statusEmoji = member.presence.status === 'dnd' ? '🔴'
+                        : member.presence.status === 'idle' ? '🟡' : '🟢';
 
-                        // แสดงว่าออนไลน์มานานแค่ไหน
-                        if (row?.online_since) {
-                            const duration = formatDuration(Date.now() - row.online_since);
-                            result += `⏱️ ออนไลน์มาแล้ว: ${duration}\n`;
-                        } else {
-                            result += `⏱️ ออนไลน์มาแล้ว: ไม่ทราบ (ยังไม่มีประวัติ)\n`;
-                        }
+                    let memberText = `${statusEmoji} **${member.user.username}** (${member.presence.status})\n`;
 
-                        if (row?.last_seen) {
-                            result += `⏰ อัปเดตล่าสุด: ${row.last_seen}\n\n`;
-                        } else {
-                            result += `⏰ อัปเดตล่าสุด: กำลังออนไลน์อยู่\n\n`;
-                        }
-
-                        processedCount++;
-                        if (processedCount === membersArray.length) {
-                            message.reply(result);
-                        }
+                    if (row?.online_since) {
+                        const duration = formatDuration(Date.now() - row.online_since);
+                        memberText += `⏱️ ออนไลน์มาแล้ว: ${duration}\n`;
+                    } else {
+                        memberText += `⏱️ ออนไลน์มาแล้ว: ไม่ทราบ (ยังไม่มีประวัติ)\n`;
                     }
-                );
-            });
+
+                    if (row?.last_seen) {
+                        memberText += `⏰ อัปเดตล่าสุด: ${row.last_seen}\n\n`;
+                    } else {
+                        memberText += `⏰ อัปเดตล่าสุด: กำลังออนไลน์อยู่\n\n`;
+                    }
+
+                    // ✅ ป้องกันปัญหาข้อความยาวเกิน 2000 ตัวอักษร: ถ้าข้อความจะเกิน ให้ตัดส่งก่อนแล้วเคลียร์ค่าเริ่มใหม่
+                    if ((result + memberText).length > 1900) {
+                        await message.reply(result);
+                        result = '';
+                    }
+
+                    result += memberText;
+                } catch (dbErr) {
+                    console.error('Database fetch error:', dbErr);
+                }
+            }
+
+            if (result.length > 0) {
+                await message.reply(result);
+            }
+
         } catch (error) {
             console.error(error);
             message.reply('❌ เกิดข้อผิดพลาดในการดึงข้อมูลคนออนไลน์');
@@ -171,8 +192,13 @@ client.on('messageCreate', async (message) => {
 
                 let text = '📋 **ประวัติการออนไลน์ล่าสุด (เรียงจากล่าสุด)**\n\n';
                 rows.forEach((row, index) => {
-                    text += `${index + 1}. **${row.username.split('#')[0]}**\n⏰ เวลา: ${row.last_seen}\n\n`;
+                    text += `${index + 1}. **${row.username ? row.username.split('#')[0] : 'ไม่ทราบชื่อ'}**\n⏰ เวลา: ${row.last_seen}\n\n`;
                 });
+
+                // ตรวจความยาวเซฟ ๆ ก่อนส่ง
+                if (text.length > 2000) {
+                    text = text.substring(0, 1950) + '\n...และอื่น ๆ';
+                }
 
                 message.reply(text);
             }
