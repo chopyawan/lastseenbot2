@@ -1,4 +1,4 @@
-require('dotenv').config(); // ✅ 1. เพิ่มบรรทัดนี้เพื่อให้อ่านไฟล์ .env ได้ถูกต้อง
+require('dotenv').config(); // ✅ อ่านไฟล์ .env ได้ถูกต้อง
 const { Client, GatewayIntentBits } = require('discord.js');
 const sqlite3 = require('sqlite3').verbose();
 
@@ -98,7 +98,7 @@ client.on('presenceUpdate', (oldPresence, newPresence) => {
     console.log(`[Presence] ${user.tag}: ${oldStatus} -> ${currentStatus}`);
 });
 
-// ฟังก์ชันครอบ db.get เพื่อให้ใช้ async/await ได้ง่ายและเรียงลำดับถูกต้อง
+// ฟังก์ชันครอบ db.get เพื่อให้ใช้ async/await
 const dbGetAsync = (query, params) => {
     return new Promise((resolve, reject) => {
         db.get(query, params, (err, row) => {
@@ -127,7 +127,6 @@ client.on('messageCreate', async (message) => {
             let result = '🟢 **รายชื่อคนออนไลน์ตอนนี้**\n\n';
             const membersArray = Array.from(onlineMembers.values());
 
-            // ✅ เปลี่ยนมาใช้ for...of ร่วมกับ Async/Await เพื่อป้องกันข้อความตีกันและเรียงลำดับสวยงาม
             for (const member of membersArray) {
                 try {
                     const row = await dbGetAsync(
@@ -153,7 +152,6 @@ client.on('messageCreate', async (message) => {
                         memberText += `⏰ อัปเดตล่าสุด: กำลังออนไลน์อยู่\n\n`;
                     }
 
-                    // ✅ ป้องกันปัญหาข้อความยาวเกิน 2000 ตัวอักษร: ถ้าข้อความจะเกิน ให้ตัดส่งก่อนแล้วเคลียร์ค่าเริ่มใหม่
                     if ((result + memberText).length > 1900) {
                         await message.reply(result);
                         result = '';
@@ -175,34 +173,77 @@ client.on('messageCreate', async (message) => {
         }
     }
 
-    // คำสั่ง !seenall
+    // ✅ คำสั่ง !seenall (เวอร์ชันอัปเกรดตามธีมที่คุณต้องการ)
     if (message.content === '!seenall') {
-        db.all(
-            `SELECT * FROM last_seen ORDER BY timestamp DESC LIMIT 15`,
-            [],
-            (err, rows) => {
-                if (err) {
-                    console.error(err);
-                    return message.reply('❌ เกิดข้อผิดพลาดในการเข้าถึงฐานข้อมูล');
+        try {
+            // ดึงข้อมูลสถานะปัจจุบันของทุกคนในเซิร์ฟเวอร์มาก่อน
+            await message.guild.members.fetch({ withPresences: true });
+
+            db.all(
+                `SELECT * FROM last_seen ORDER BY timestamp DESC LIMIT 15`,
+                [],
+                (err, rows) => {
+                    if (err) {
+                        console.error(err);
+                        return message.reply('❌ เกิดข้อผิดพลาดในการเข้าถึงฐานข้อมูล');
+                    }
+
+                    if (!rows || rows.length === 0) {
+                        return message.reply('📋 ยังไม่มีประวัติการออนไลน์ในระบบ');
+                    }
+
+                    let text = '📋 **รายชื่อคนออนไลน์ล่าสุด**\n\n';
+
+                    rows.forEach((row) => {
+                        // ดึงสถานะปัจจุบันจริง ๆ ของคนนี้ในเซิร์ฟเวอร์
+                        const member = message.guild.members.cache.get(row.user_id);
+                        const currentStatus = member?.presence?.status || 'offline';
+
+                        // เลือกเอโมจิและคำสถานะตามจริง
+                        let statusEmoji = '⚫';
+                        let statusText = 'offline';
+
+                        if (currentStatus === 'online') {
+                            statusEmoji = '🟢';
+                            statusText = 'online';
+                        } else if (currentStatus === 'idle') {
+                            statusEmoji = '🟡';
+                            statusText = 'idle';
+                        } else if (currentStatus === 'dnd') {
+                            statusEmoji = '🔴';
+                            statusText = 'dnd';
+                        }
+
+                        const usernameOnly = row.username ? row.username.split('#')[0] : 'ไม่ทราบชื่อ';
+
+                        // ต่อข้อความบรรทัดที่ 1 และ 2 ตามเรฟของคุณ
+                        text += `${statusEmoji} **${usernameOnly}** (${statusText})\n`;
+                        text += `⏱️ ออนไลน์ล่าสุดเมื่อ: ${row.last_seen}\n`;
+
+                        // คำนวณเวลาออนไลน์/ออฟไลน์ให้ถูกต้องตามสถานะจริง
+                        let durationMs = 0;
+                        if (currentStatus === 'offline') {
+                            durationMs = Date.now() - row.timestamp; // ออฟไลน์ไปแล้วนานแค่นี้
+                        } else {
+                            durationMs = Date.now() - (row.online_since || row.timestamp); // ออนไลน์ต่อเนื่องมานานแค่นี้
+                        }
+                        const durationText = formatDuration(durationMs);
+
+                        // บรรทัดที่ 3 แสดงระยะเวลา
+                        text += `⏰ เวลาออนไลน์: ${durationText}\n\n`;
+                    });
+
+                    if (text.length > 2000) {
+                        text = text.substring(0, 1950) + '\n...และอื่น ๆ';
+                    }
+
+                    message.reply(text);
                 }
-
-                if (!rows || rows.length === 0) {
-                    return message.reply('📋 ยังไม่มีประวัติการออนไลน์ในระบบ');
-                }
-
-                let text = '📋 **ประวัติการออนไลน์ล่าสุด (เรียงจากล่าสุด)**\n\n';
-                rows.forEach((row, index) => {
-                    text += `${index + 1}. **${row.username ? row.username.split('#')[0] : 'ไม่ทราบชื่อ'}**\n⏰ เวลา: ${row.last_seen}\n\n`;
-                });
-
-                // ตรวจความยาวเซฟ ๆ ก่อนส่ง
-                if (text.length > 2000) {
-                    text = text.substring(0, 1950) + '\n...และอื่น ๆ';
-                }
-
-                message.reply(text);
-            }
-        );
+            );
+        } catch (error) {
+            console.error(error);
+            message.reply('❌ เกิดข้อผิดพลาดในการดึงข้อมูลประวัติ');
+        }
     }
 });
 
